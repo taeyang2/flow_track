@@ -109,8 +109,10 @@ def save_graph(graph):
         json.dump(graph, graph_file, ensure_ascii=False, indent=2)
 
 
-def main() -> None:
-    session_id_arg = sys.argv[1] if len(sys.argv) > 1 else None
+def main(session_id=None) -> str:
+    session_id_arg = session_id
+    if session_id_arg is None and len(sys.argv) > 1:
+        session_id_arg = sys.argv[1]
 
     try:
         records = load_task_records()
@@ -138,6 +140,7 @@ def main() -> None:
 
     save_graph(graph)
     print(f"Saved graph for session {session_id} to {GRAPH_PATH}")
+    return session_id
 
 
 if __name__ == "__main__":

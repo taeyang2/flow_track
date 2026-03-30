@@ -63,7 +63,7 @@ def call_llm(messages):
     return response.choices[0].message.content or ""
 
 
-def main() -> None:
+def main() -> str:
     ensure_log_dir()
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -111,6 +111,8 @@ def main() -> None:
 
         print(f"Assistant: {assistant_reply}")
         turn += 1
+
+    return session_id
 
 
 if __name__ == "__main__":

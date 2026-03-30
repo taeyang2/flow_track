@@ -171,23 +171,27 @@ def save_html(html):
         html_file.write(html)
 
 
-def main() -> None:
-    session_id_arg = sys.argv[1] if len(sys.argv) > 1 else None
+def main(session_id=None, print_mermaid=False) -> str:
+    session_id_arg = session_id
+    if session_id_arg is None and len(sys.argv) > 1:
+        session_id_arg = sys.argv[1]
 
     try:
         graph = load_graph()
-        validate_session_id(graph, session_id_arg)
+        session_id = validate_session_id(graph, session_id_arg)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Failed to prepare visualization: {exc}")
         sys.exit(1)
 
     mermaid_text = build_mermaid(graph)
-    print(mermaid_text)
+    if print_mermaid:
+        print(mermaid_text)
 
     html = build_html(graph, mermaid_text)
     save_html(html)
     print(f"Saved HTML visualization to {HTML_PATH}")
+    return session_id
 
 
 if __name__ == "__main__":
-    main()
+    main(print_mermaid=True)

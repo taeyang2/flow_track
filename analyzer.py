@@ -183,10 +183,12 @@ def evaluate_task_deviation(task, goals):
     return not relevant
 
 
-def main() -> None:
+def main(session_id=None) -> str:
     ensure_log_dir()
 
-    session_id_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    session_id_arg = session_id
+    if session_id_arg is None and len(sys.argv) > 1:
+        session_id_arg = sys.argv[1]
 
     try:
         records = load_conversation_records()
@@ -244,6 +246,7 @@ def main() -> None:
 
     append_tasks_log(result)
     print(f"Saved analysis for session {session_id} to {TASKS_LOG_PATH}")
+    return session_id
 
 
 if __name__ == "__main__":
