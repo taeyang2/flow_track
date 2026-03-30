@@ -72,6 +72,7 @@ def build_nodes(tasks):
                 "task_name": task.get("task_name", ""),
                 "status": task.get("status", ""),
                 "start_turn": task.get("start_turn", 0),
+                "deviation": task.get("deviation", False),
             }
         )
 

@@ -22,6 +22,7 @@ except ImportError:
 MODEL_NAME = "gpt-4o-mini"
 BASE_DIR = Path(__file__).resolve().parent
 LOG_PATH = Path.home() / "toy" / "flow_track" / "logs" / "conversation_log.jsonl"
+GOAL_LOG_PATH = Path.home() / "toy" / "flow_track" / "logs" / "goal.jsonl"
 
 load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
@@ -29,6 +30,16 @@ load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
 
 def ensure_log_dir() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def append_goal_log(session_id: str, goals: list[str]) -> None:
+    record = {
+        "session_id": session_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "goals": goals,
+    }
+    with GOAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def append_log(session_id: str, turn: int, role: str, content: str) -> None:
@@ -58,6 +69,9 @@ def main() -> None:
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     messages = []
     turn = 1
+    goals_input = input("오늘 목표를 입력하세요 (쉼표로 구분): ").strip()
+    goals = [goal.strip() for goal in goals_input.split(",") if goal.strip()]
+    append_goal_log(session_id, goals)
 
     if not os.getenv("OPENAI_API_KEY"):
         print("OPENAI_API_KEY is missing.")

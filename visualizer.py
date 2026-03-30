@@ -51,7 +51,10 @@ def build_mermaid(graph):
 
     for node in nodes:
         node_id = node["id"]
-        label = escape_mermaid_label(node.get("task_name", ""))
+        task_name = node.get("task_name", "")
+        if node.get("deviation", False):
+            task_name = f"⚠ {task_name}"
+        label = escape_mermaid_label(task_name)
         lines.append(f'  {node_id}["{label}"]')
 
     for edge in edges:
@@ -59,11 +62,15 @@ def build_mermaid(graph):
 
     lines.append("  classDef completed fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;")
     lines.append("  classDef inProgress fill:#fff3bf,stroke:#f9a825,stroke-width:2px,color:#8a6d00;")
-    lines.append("  classDef abandoned fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#8e0000;")
+    lines.append("  classDef abandoned fill:#e0e0e0,stroke:#757575,stroke-width:2px,color:#424242;")
+    lines.append("  classDef deviation fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#8e0000;")
 
     for node in nodes:
-        status = node.get("status", "")
-        class_name = STATUS_CLASSES.get(status)
+        if node.get("deviation", False):
+            class_name = "deviation"
+        else:
+            status = node.get("status", "")
+            class_name = STATUS_CLASSES.get(status)
         if class_name:
             lines.append(f'  class {node["id"]} {class_name};')
 
@@ -146,7 +153,8 @@ def build_html(graph, mermaid_text):
   <div class="legend">
     <div class="legend-item"><span class="swatch" style="background:#c8e6c9;"></span>completed</div>
     <div class="legend-item"><span class="swatch" style="background:#fff3bf;"></span>in_progress</div>
-    <div class="legend-item"><span class="swatch" style="background:#ffcdd2;"></span>abandoned</div>
+    <div class="legend-item"><span class="swatch" style="background:#e0e0e0;"></span>abandoned</div>
+    <div class="legend-item"><span class="swatch" style="background:#ffcdd2;"></span>deviation</div>
   </div>
   <div class="graph-card">
     <pre class="mermaid">

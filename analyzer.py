@@ -10,6 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 CONVERSATION_LOG_PATH = LOG_DIR / "conversation_log.jsonl"
 TASKS_LOG_PATH = LOG_DIR / "tasks.jsonl"
+GOAL_LOG_PATH = LOG_DIR / "goal.jsonl"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "gemma3:12b"
 SYSTEM_PROMPT = """You are an expert in analyzing work-related conversations.
@@ -26,6 +27,11 @@ Respond only in the following JSON format. Do not include any other text.
     }
   ]
 }
+"""
+GOAL_RELEVANCE_SYSTEM_PROMPT = """You are a work flow analyst.
+Given a goal list and a task, determine if the task is relevant to achieving the goals.
+Respond only in JSON format:
+{"relevant": true} or {"relevant": false}
 """
 
 
@@ -49,6 +55,27 @@ def load_conversation_records():
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"Invalid JSON in conversation log at line {line_number}: {exc}"
+                ) from exc
+
+    return records
+
+
+def load_goal_records():
+    if not GOAL_LOG_PATH.is_file():
+        return []
+
+    records = []
+    with GOAL_LOG_PATH.open("r", encoding="utf-8") as log_file:
+        for line_number, line in enumerate(log_file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in goal log at line {line_number}: {exc}"
                 ) from exc
 
     return records
@@ -118,6 +145,44 @@ def strip_code_block(text):
     return stripped
 
 
+def load_session_goals(goal_records, session_id):
+    session_goal_records = [
+        record for record in goal_records if record.get("session_id") == session_id
+    ]
+    if not session_goal_records:
+        return []
+
+    session_goal_records.sort(key=lambda item: item.get("timestamp", ""))
+    latest_record = session_goal_records[-1]
+    goals = latest_record.get("goals", [])
+    return goals if isinstance(goals, list) else []
+
+
+def evaluate_task_deviation(task, goals):
+    if not goals:
+        return False
+
+    payload = {
+        "goals": goals,
+        "task": {
+            "task_name": task.get("task_name", ""),
+            "status": task.get("status", ""),
+            "start_turn": task.get("start_turn", 0),
+        },
+    }
+    messages = [
+        {"role": "system", "content": GOAL_RELEVANCE_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    raw_response = call_ollama(messages)
+    cleaned_response = strip_code_block(raw_response)
+    parsed_response = json.loads(cleaned_response)
+    relevant = parsed_response.get("relevant")
+    if not isinstance(relevant, bool):
+        raise ValueError("`relevant` field is missing or is not a boolean.")
+    return not relevant
+
+
 def main() -> None:
     ensure_log_dir()
 
@@ -127,6 +192,8 @@ def main() -> None:
         records = load_conversation_records()
         session_id = select_session_id(records, session_id_arg)
         conversation_text = build_conversation_text(records, session_id)
+        goal_records = load_goal_records()
+        goals = load_session_goals(goal_records, session_id)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Failed to prepare conversation: {exc}")
         sys.exit(1)
@@ -157,10 +224,23 @@ def main() -> None:
         tasks = parsed_response.get("tasks")
         if not isinstance(tasks, list):
             raise ValueError("`tasks` field is missing or is not a list.")
-        result["tasks"] = tasks
+        normalized_tasks = []
+        for task in tasks:
+            normalized_task = dict(task)
+            normalized_task["deviation"] = False
+            if goals:
+                normalized_task["deviation"] = evaluate_task_deviation(normalized_task, goals)
+            normalized_tasks.append(normalized_task)
+        result["tasks"] = normalized_tasks
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"Failed to parse Ollama JSON response: {exc}")
         result["raw_response"] = raw_response
+    except error.URLError as exc:
+        print(f"Ollama request failed during deviation analysis: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"Ollama request failed during deviation analysis: {exc}")
+        sys.exit(1)
 
     append_tasks_log(result)
     print(f"Saved analysis for session {session_id} to {TASKS_LOG_PATH}")
