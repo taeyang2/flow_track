@@ -23,6 +23,21 @@ MODEL_NAME = "gpt-4o-mini"
 BASE_DIR = Path(__file__).resolve().parent
 LOG_PATH = Path.home() / "toy" / "flow_track" / "logs" / "conversation_log.jsonl"
 GOAL_LOG_PATH = Path.home() / "toy" / "flow_track" / "logs" / "goal.jsonl"
+EXIT_TRIGGERS = {
+    "/quit",
+    "quit",
+    "/exit",
+    "exit",
+    "q",
+    "종료",
+    "대화 종료",
+    "안녕",
+    "끝",
+    "그만",
+    "bye",
+    "goodbye",
+    "see you",
+}
 
 load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
@@ -63,13 +78,40 @@ def call_llm(messages):
     return response.choices[0].message.content or ""
 
 
-def main() -> str:
+def confirm_exit() -> bool:
+    while True:
+        answer = input("대화를 종료하시겠습니까? (y/n): ").strip().lower()
+        if answer == "y":
+            return True
+        if answer == "n":
+            return False
+
+
+def confirm_program_exit() -> bool:
+    while True:
+        answer = input("프로그램을 종료하시겠습니까? (y/n): ").strip().lower()
+        if answer == "y":
+            return True
+        if answer == "n":
+            return False
+
+
+def main() -> str | None:
     ensure_log_dir()
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     messages = []
+    has_conversation = False
     turn = 1
-    goals_input = input("오늘 목표를 입력하세요 (쉼표로 구분): ").strip()
+    while True:
+        goals_input = input("오늘 목표를 입력하세요 (쉼표로 구분): ").strip()
+        if goals_input.lower() in EXIT_TRIGGERS:
+            if confirm_program_exit():
+                print("Exiting.")
+                return None
+            continue
+        break
+
     goals = [goal.strip() for goal in goals_input.split(",") if goal.strip()]
     append_goal_log(session_id, goals)
 
@@ -91,13 +133,19 @@ def main() -> str:
         if not user_input:
             continue
 
-        if user_input == "/quit":
-            print("Exiting.")
-            break
+        if user_input.lower() in EXIT_TRIGGERS:
+            if confirm_exit():
+                print("Exiting.")
+                if not has_conversation:
+                    print("대화 내용이 없어 분석을 건너뜁니다.")
+                    return None
+                break
+            continue
 
         user_message = {"role": "user", "content": user_input}
         messages.append(user_message)
         append_log(session_id, turn, "user", user_input)
+        has_conversation = True
 
         try:
             assistant_reply = call_llm(messages)

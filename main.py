@@ -11,6 +11,8 @@ HTML_PATH = Path.home() / "toy" / "flow_track" / "logs" / "graph.html"
 
 def main() -> None:
     session_id = cli_chat.main()
+    if not session_id:
+        return
 
     print("분석 중...")
     analyzer.main(session_id)
