@@ -33,6 +33,15 @@ Given a goal list and a task, determine if the task is relevant to achieving the
 Respond only in JSON format:
 {"relevant": true} or {"relevant": false}
 """
+GOAL_EXTRACTION_SYSTEM_PROMPT = """You are a work flow analyst.
+Look at the first few turns of this conversation and extract
+the user's main work goals.
+goals must be in Korean only.
+Do not include English translation or romanization.
+Respond only in JSON format:
+{"goals": ["goal1", "goal2", ...]}
+Do not include more than 3 goals.
+"""
 
 
 def ensure_log_dir() -> None:
@@ -111,6 +120,26 @@ def build_conversation_text(records, session_id):
     return "\n".join(lines)
 
 
+def build_initial_turns_text(records, session_id, max_turn=5):
+    session_records = [record for record in records if record.get("session_id") == session_id]
+    if not session_records:
+        raise ValueError(f"No records found for session: {session_id}")
+
+    session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", "")))
+
+    lines = []
+    for record in session_records:
+        turn = record.get("turn", 0)
+        if turn > max_turn:
+            continue
+
+        role = record.get("role", "unknown")
+        content = record.get("content", "")
+        lines.append(f"Turn {turn} [{role}]: {content}")
+
+    return "\n".join(lines)
+
+
 def call_ollama(messages):
     payload = {
         "model": OLLAMA_MODEL,
@@ -130,6 +159,19 @@ def call_ollama(messages):
 
     parsed = json.loads(body)
     return parsed["message"]["content"]
+
+
+def append_goal_log(session_id, goals, auto_extracted=False):
+    record = {
+        "session_id": session_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "goals": goals,
+    }
+    if auto_extracted:
+        record["auto_extracted"] = True
+
+    with GOAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def append_tasks_log(record):
@@ -156,6 +198,28 @@ def load_session_goals(goal_records, session_id):
     latest_record = session_goal_records[-1]
     goals = latest_record.get("goals", [])
     return goals if isinstance(goals, list) else []
+
+
+def extract_goals_from_initial_turns(initial_turns_text):
+    messages = [
+        {"role": "system", "content": GOAL_EXTRACTION_SYSTEM_PROMPT},
+        {"role": "user", "content": initial_turns_text},
+    ]
+    raw_response = call_ollama(messages)
+    cleaned_response = strip_code_block(raw_response)
+    parsed_response = json.loads(cleaned_response)
+    goals = parsed_response.get("goals")
+    if not isinstance(goals, list):
+        raise ValueError("`goals` field is missing or is not a list.")
+
+    normalized_goals = []
+    for goal in goals[:3]:
+        if isinstance(goal, str):
+            stripped_goal = goal.strip()
+            if stripped_goal:
+                normalized_goals.append(stripped_goal)
+
+    return normalized_goals
 
 
 def evaluate_task_deviation(task, goals):
@@ -194,11 +258,23 @@ def main(session_id=None) -> str:
         records = load_conversation_records()
         session_id = select_session_id(records, session_id_arg)
         conversation_text = build_conversation_text(records, session_id)
+        initial_turns_text = build_initial_turns_text(records, session_id)
         goal_records = load_goal_records()
         goals = load_session_goals(goal_records, session_id)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Failed to prepare conversation: {exc}")
         sys.exit(1)
+
+    if not goals and initial_turns_text:
+        try:
+            goals = extract_goals_from_initial_turns(initial_turns_text)
+            append_goal_log(session_id, goals, auto_extracted=True)
+        except error.URLError as exc:
+            print(f"Ollama request failed during goal extraction: {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            print(f"Ollama request failed during goal extraction: {exc}")
+            sys.exit(1)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
