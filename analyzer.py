@@ -72,6 +72,18 @@ Classify as goal_changed (true) only if:
 Classify as goal_changed (false) if:
 1. The conversation is a temporary detour (1~2 turns).
 2. The conversation is still related to the original goals.
+3. The conversation is exploring sub-topics or details
+   within the same category as the current goals.
+   (e.g. goal: "research restaurants in Suwon"
+    → conversation about "famous chicken restaurants"
+    → conversation about "reviews of a specific restaurant"
+    These are all sub-topics of the same goal, NOT a goal change.)
+4. The user is narrowing down or drilling deeper into
+   the current goal topic.
+
+Only classify as goal_changed (true) if the conversation
+has completely shifted to an unrelated domain for multiple turns
+and shows no sign of returning to the original goal.
 
 Respond only in JSON format:
 {
