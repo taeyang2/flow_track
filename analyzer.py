@@ -60,6 +60,27 @@ Respond only in JSON format:
 {"goals": ["goal1", "goal2", ...]}
 Do not include more than 3 goals.
 """
+GOAL_CHANGE_DETECTION_SYSTEM_PROMPT = """You are a work flow analyst.
+Look at the recent conversation and the current goals.
+Determine if the user has shifted to a completely different work focus.
+
+Classify as goal_changed (true) only if:
+1. The recent conversation is clearly about a different work topic
+   that has continued for multiple turns.
+2. The user shows no intention of returning to the original goals.
+
+Classify as goal_changed (false) if:
+1. The conversation is a temporary detour (1~2 turns).
+2. The conversation is still related to the original goals.
+
+Respond only in JSON format:
+{
+  "goal_changed": true or false,
+  "new_goals": ["새로운 목표1", "새로운 목표2"]
+}
+new_goals must be in Korean only.
+If goal_changed is false, new_goals should be an empty list.
+"""
 
 
 def ensure_log_dir() -> None:
@@ -158,6 +179,37 @@ def build_initial_turns_text(records, session_id, max_turn=5):
     return "\n".join(lines)
 
 
+def build_recent_turns_text(records, session_id, last_n_turns=5):
+    session_records = [record for record in records if record.get("session_id") == session_id]
+    if not session_records:
+        return ""
+
+    session_records.sort(
+        key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", ""))
+    )
+    turn_numbers = sorted(
+        {
+            record.get("turn")
+            for record in session_records
+            if isinstance(record.get("turn"), int)
+        }
+    )
+    recent_turns = set(turn_numbers[-last_n_turns:])
+    if not recent_turns:
+        return ""
+
+    lines = []
+    for record in session_records:
+        turn = record.get("turn", 0)
+        if turn not in recent_turns:
+            continue
+        role = record.get("role", "unknown")
+        content = record.get("content", "")
+        lines.append(f"Turn {turn} [{role}]: {content}")
+
+    return "\n".join(lines)
+
+
 def call_ollama(messages):
     payload = {
         "model": OLLAMA_MODEL,
@@ -179,17 +231,95 @@ def call_ollama(messages):
     return parsed["message"]["content"]
 
 
-def append_goal_log(session_id, goals, auto_extracted=False):
-    record = {
-        "session_id": session_id,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "goals": goals,
-    }
-    if auto_extracted:
-        record["auto_extracted"] = True
+def write_goal_records(records):
+    with GOAL_LOG_PATH.open("w", encoding="utf-8") as log_file:
+        for record in records:
+            log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    with GOAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
-        log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+def normalize_session_goal_records(session_goal_records):
+    if not session_goal_records:
+        return []
+
+    sorted_records = sorted(
+        session_goal_records,
+        key=lambda item: (item.get("timestamp", ""), item.get("version", 0)),
+    )
+    normalized_records = []
+    total_records = len(sorted_records)
+    for index, record in enumerate(sorted_records, start=1):
+        normalized_record = dict(record)
+        goals = normalized_record.get("goals", [])
+        normalized_record["goals"] = goals if isinstance(goals, list) else []
+        normalized_record["version"] = index
+        normalized_record["auto_extracted"] = normalized_record.get("auto_extracted") is True
+        normalized_record["superseded"] = index != total_records
+        normalized_records.append(normalized_record)
+
+    return normalized_records
+
+
+def get_session_goal_history(goal_records, session_id):
+    session_goal_records = [
+        record for record in goal_records if record.get("session_id") == session_id
+    ]
+    return normalize_session_goal_records(session_goal_records)
+
+
+def get_active_goal_record(goal_records, session_id):
+    session_goal_records = get_session_goal_history(goal_records, session_id)
+    active_records = [
+        record for record in session_goal_records if record.get("superseded") is False
+    ]
+    if not active_records:
+        return None
+    return active_records[-1]
+
+
+def get_next_goal_version(goal_records, session_id):
+    session_goal_records = get_session_goal_history(goal_records, session_id)
+    if not session_goal_records:
+        return 1
+    return session_goal_records[-1].get("version", 0) + 1
+
+
+def save_goal_version(session_id, goals, auto_extracted=False):
+    goal_records = load_goal_records()
+    other_records = [
+        record for record in goal_records if record.get("session_id") != session_id
+    ]
+    session_goal_records = get_session_goal_history(goal_records, session_id)
+
+    updated_session_records = []
+    for record in session_goal_records:
+        updated_record = dict(record)
+        updated_record["superseded"] = True
+        updated_session_records.append(updated_record)
+
+    updated_session_records.append(
+        {
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "goals": goals,
+            "auto_extracted": auto_extracted,
+            "version": len(session_goal_records) + 1,
+            "superseded": False,
+        }
+    )
+
+    write_goal_records(other_records + updated_session_records)
+    return updated_session_records[-1]
+
+
+def restore_previous_goal_version(session_id):
+    goal_records = load_goal_records()
+    session_goal_records = get_session_goal_history(goal_records, session_id)
+    if len(session_goal_records) < 2:
+        return None
+
+    previous_record = session_goal_records[-2]
+    restored_goals = previous_record.get("goals", [])
+    return save_goal_version(session_id, restored_goals, auto_extracted=False)
 
 
 def append_tasks_log(record):
@@ -206,15 +336,10 @@ def strip_code_block(text):
 
 
 def load_session_goals(goal_records, session_id):
-    session_goal_records = [
-        record for record in goal_records if record.get("session_id") == session_id
-    ]
-    if not session_goal_records:
+    active_record = get_active_goal_record(goal_records, session_id)
+    if not active_record:
         return []
-
-    session_goal_records.sort(key=lambda item: item.get("timestamp", ""))
-    latest_record = session_goal_records[-1]
-    goals = latest_record.get("goals", [])
+    goals = active_record.get("goals", [])
     return goals if isinstance(goals, list) else []
 
 
@@ -238,6 +363,49 @@ def extract_goals_from_initial_turns(initial_turns_text):
                 normalized_goals.append(stripped_goal)
 
     return normalized_goals
+
+
+def detect_goal_change(session_id, current_goals, conversation_records):
+    if not current_goals:
+        return {"goal_changed": False, "new_goals": []}
+
+    recent_conversation = build_recent_turns_text(
+        conversation_records, session_id, last_n_turns=5
+    )
+    if not recent_conversation:
+        return {"goal_changed": False, "new_goals": []}
+
+    payload = {
+        "current_goals": current_goals,
+        "recent_conversation": recent_conversation,
+    }
+    messages = [
+        {"role": "system", "content": GOAL_CHANGE_DETECTION_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    raw_response = call_ollama(messages)
+    cleaned_response = strip_code_block(raw_response)
+    parsed_response = json.loads(cleaned_response)
+
+    goal_changed = parsed_response.get("goal_changed")
+    new_goals = parsed_response.get("new_goals")
+
+    if not isinstance(goal_changed, bool):
+        raise ValueError("`goal_changed` field is missing or is not a boolean.")
+    if not isinstance(new_goals, list):
+        raise ValueError("`new_goals` field is missing or is not a list.")
+
+    normalized_goals = []
+    for goal in new_goals[:3]:
+        if isinstance(goal, str):
+            stripped_goal = goal.strip()
+            if stripped_goal:
+                normalized_goals.append(stripped_goal)
+
+    if not goal_changed:
+        return {"goal_changed": False, "new_goals": []}
+
+    return {"goal_changed": True, "new_goals": normalized_goals}
 
 
 def build_task_context(records, start_turn, turn_window=2):
@@ -313,7 +481,7 @@ def main(session_id=None) -> str:
     if not goals and initial_turns_text:
         try:
             goals = extract_goals_from_initial_turns(initial_turns_text)
-            append_goal_log(session_id, goals, auto_extracted=True)
+            save_goal_version(session_id, goals, auto_extracted=True)
         except error.URLError as exc:
             print(f"Ollama request failed during goal extraction: {exc}")
             sys.exit(1)
