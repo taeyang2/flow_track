@@ -38,6 +38,7 @@ EXIT_TRIGGERS = {
     "goodbye",
     "see you",
 }
+GOAL_COMMANDS = {"/goal"}
 
 load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
@@ -96,6 +97,18 @@ def confirm_program_exit() -> bool:
             return False
 
 
+def print_goals(goals: list[str]) -> None:
+    print("=============================")
+    print("오늘의 목표")
+    print("=============================")
+    if goals:
+        for index, goal in enumerate(goals, start=1):
+            print(f"{index}. {goal}")
+    else:
+        print("(목표 없음 - 자동 추출 예정)")
+    print("=============================")
+
+
 def main() -> str | None:
     ensure_log_dir()
 
@@ -120,6 +133,7 @@ def main() -> str | None:
         print(f"Set it in the shell or add it to {BASE_DIR / '.env'}")
         sys.exit(1)
 
+    print_goals(goals)
     print(f"CLI chat started. Model: {MODEL_NAME}")
     print("Exit with /quit")
 
@@ -131,6 +145,10 @@ def main() -> str | None:
             break
 
         if not user_input:
+            continue
+
+        if user_input.lower() in GOAL_COMMANDS:
+            print_goals(goals)
             continue
 
         if user_input.lower() in EXIT_TRIGGERS:

@@ -29,7 +29,25 @@ Respond only in the following JSON format. Do not include any other text.
 }
 """
 GOAL_RELEVANCE_SYSTEM_PROMPT = """You are a work flow analyst.
-Given a goal list and a task, determine if the task is relevant to achieving the goals.
+Given a goal list, a task, and the surrounding conversation context,
+determine if the task is relevant to achieving the goals.
+
+Use the conversation context to understand why the user performed
+this task and whether it naturally follows from the goals.
+
+Classify as relevant (true) only if:
+1. The task is directly related to the goals.
+2. The task is a necessary sub-task to achieve the goals,
+   based on the conversation context.
+
+Classify as irrelevant (false) if:
+1. The task is casual conversation or off-topic chatting.
+2. The task is exploring interesting but unnecessary information
+   such as trivia, history, advertisements, or background knowledge.
+3. The task is clearly unrelated to the goals.
+
+When in doubt, classify as irrelevant (false).
+
 Respond only in JSON format:
 {"relevant": true} or {"relevant": false}
 """
@@ -222,17 +240,44 @@ def extract_goals_from_initial_turns(initial_turns_text):
     return normalized_goals
 
 
-def evaluate_task_deviation(task, goals):
+def build_task_context(records, start_turn, turn_window=2):
+    if not isinstance(start_turn, int):
+        return []
+
+    min_turn = max(1, start_turn - turn_window)
+    max_turn = start_turn + turn_window
+    session_records = [
+        record
+        for record in records
+        if min_turn <= record.get("turn", 0) <= max_turn
+    ]
+    session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", "")))
+
+    context = []
+    for record in session_records:
+        context.append(
+            {
+                "role": record.get("role", "unknown"),
+                "content": record.get("content", ""),
+            }
+        )
+
+    return context
+
+
+def evaluate_task_deviation(task, goals, conversation_records):
     if not goals:
         return False
 
+    start_turn = task.get("start_turn", 0)
     payload = {
         "goals": goals,
         "task": {
             "task_name": task.get("task_name", ""),
             "status": task.get("status", ""),
-            "start_turn": task.get("start_turn", 0),
+            "start_turn": start_turn,
         },
+        "context": build_task_context(conversation_records, start_turn),
     }
     messages = [
         {"role": "system", "content": GOAL_RELEVANCE_SYSTEM_PROMPT},
@@ -302,12 +347,17 @@ def main(session_id=None) -> str:
         tasks = parsed_response.get("tasks")
         if not isinstance(tasks, list):
             raise ValueError("`tasks` field is missing or is not a list.")
+        session_records = [
+            record for record in records if record.get("session_id") == session_id
+        ]
         normalized_tasks = []
         for task in tasks:
             normalized_task = dict(task)
             normalized_task["deviation"] = False
             if goals:
-                normalized_task["deviation"] = evaluate_task_deviation(normalized_task, goals)
+                normalized_task["deviation"] = evaluate_task_deviation(
+                    normalized_task, goals, session_records
+                )
             normalized_tasks.append(normalized_task)
         result["tasks"] = normalized_tasks
     except (json.JSONDecodeError, ValueError) as exc:
