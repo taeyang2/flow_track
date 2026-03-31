@@ -5,6 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib import error
 
+import analyzer
+import graph_builder
+import visualizer
 from analyzer import (
     detect_goal_change,
     get_active_goal_record,
@@ -314,6 +317,30 @@ def main() -> str | None:
                     )
                     goals = saved_record.get("goals", [])
                     print("목표가 업데이트됐습니다.")
+
+            print("분석 중... (대화는 잠시 후 계속됩니다)")
+            try:
+                analyzer.main(session_id)
+            except SystemExit as exc:
+                print(f"분석 단계 실행 실패: {exc}")
+            except Exception as exc:
+                print(f"분석 단계 실행 실패: {exc}")
+
+            try:
+                graph_builder.main(session_id)
+            except SystemExit as exc:
+                print(f"그래프 변환 단계 실행 실패: {exc}")
+            except Exception as exc:
+                print(f"그래프 변환 단계 실행 실패: {exc}")
+
+            try:
+                visualizer.main(session_id)
+            except SystemExit as exc:
+                print(f"시각화 단계 실행 실패: {exc}")
+            except Exception as exc:
+                print(f"시각화 단계 실행 실패: {exc}")
+
+            print("--- 워크플로우가 업데이트됐습니다. ---")
 
         turn += 1
 
