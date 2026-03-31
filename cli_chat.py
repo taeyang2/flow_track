@@ -48,12 +48,16 @@ def ensure_log_dir() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
-def append_goal_log(session_id: str, goals: list[str]) -> None:
+def append_goal_log(
+    session_id: str, goals: list[str], auto_extracted: bool = False
+) -> None:
     record = {
         "session_id": session_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "goals": goals,
     }
+    if auto_extracted:
+        record["auto_extracted"] = True
     with GOAL_LOG_PATH.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -97,9 +101,43 @@ def confirm_program_exit() -> bool:
             return False
 
 
-def print_goals(goals: list[str]) -> None:
+def load_latest_goal_record(session_id: str) -> tuple[list[str], bool]:
+    if not GOAL_LOG_PATH.exists():
+        return [], False
+
+    latest_record = None
+    with GOAL_LOG_PATH.open("r", encoding="utf-8") as log_file:
+        for line in log_file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("session_id") != session_id:
+                continue
+            if latest_record is None or record.get("timestamp", "") >= latest_record.get(
+                "timestamp", ""
+            ):
+                latest_record = record
+
+    if latest_record is None:
+        return [], False
+
+    goals = latest_record.get("goals", [])
+    auto_extracted = latest_record.get("auto_extracted") is True
+    return (goals if isinstance(goals, list) else []), auto_extracted
+
+
+def print_goals(
+    goals: list[str], title: str = "오늘의 목표", auto_extracted: bool = False
+) -> None:
     print("=============================")
-    print("오늘의 목표")
+    if auto_extracted:
+        print(f"{title} (자동 추출)")
+    else:
+        print(title)
     print("=============================")
     if goals:
         for index, goal in enumerate(goals, start=1):
@@ -126,7 +164,7 @@ def main() -> str | None:
         break
 
     goals = [goal.strip() for goal in goals_input.split(",") if goal.strip()]
-    append_goal_log(session_id, goals)
+    append_goal_log(session_id, goals, auto_extracted=False)
 
     if not os.getenv("OPENAI_API_KEY"):
         print("OPENAI_API_KEY is missing.")
@@ -148,7 +186,29 @@ def main() -> str | None:
             continue
 
         if user_input.lower() in GOAL_COMMANDS:
-            print_goals(goals)
+            goals, goals_auto_extracted = load_latest_goal_record(session_id)
+            print_goals(
+                goals,
+                title="현재 목표",
+                auto_extracted=goals_auto_extracted,
+            )
+
+            while True:
+                answer = input("목표를 수정하시겠습니까? (y/n): ").strip().lower()
+                if answer == "y":
+                    new_goals_input = input(
+                        "새로운 목표를 입력하세요 (쉼표로 구분): "
+                    ).strip()
+                    goals = [
+                        goal.strip()
+                        for goal in new_goals_input.split(",")
+                        if goal.strip()
+                    ]
+                    append_goal_log(session_id, goals, auto_extracted=False)
+                    print("목표가 업데이트됐습니다.")
+                    break
+                if answer == "n":
+                    break
             continue
 
         if user_input.lower() in EXIT_TRIGGERS:
