@@ -9,6 +9,7 @@ import analyzer
 import graph_builder
 import visualizer
 from analyzer import (
+    GOAL_TMP_PATH,
     detect_goal_change,
     get_active_goal_record,
     get_next_goal_version,
@@ -181,6 +182,9 @@ def prompt_goal_change_update(
 
 def main() -> str | None:
     ensure_log_dir()
+
+    if GOAL_TMP_PATH.exists():
+        GOAL_TMP_PATH.unlink()
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     messages = []

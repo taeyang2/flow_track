@@ -1,6 +1,8 @@
 import json
+import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib import error, request
@@ -11,6 +13,7 @@ LOG_DIR = BASE_DIR / "logs"
 CONVERSATION_LOG_PATH = LOG_DIR / "conversation_log.jsonl"
 TASKS_LOG_PATH = LOG_DIR / "tasks.jsonl"
 GOAL_LOG_PATH = LOG_DIR / "goal.jsonl"
+GOAL_TMP_PATH = LOG_DIR / "goal.jsonl.tmp"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "gemma3:12b"
 SYSTEM_PROMPT = """You are an expert in analyzing work-related conversations.
@@ -120,25 +123,33 @@ def load_conversation_records():
     return records
 
 
-def load_goal_records():
-    if not GOAL_LOG_PATH.is_file():
-        return []
-
+def _parse_goal_records_from_file():
     records = []
     with GOAL_LOG_PATH.open("r", encoding="utf-8") as log_file:
         for line_number, line in enumerate(log_file, start=1):
             line = line.strip()
             if not line:
                 continue
-
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"Invalid JSON in goal log at line {line_number}: {exc}"
                 ) from exc
-
     return records
+
+
+def load_goal_records():
+    if not GOAL_LOG_PATH.is_file():
+        return []
+
+    try:
+        return _parse_goal_records_from_file()
+    except ValueError:
+        time.sleep(0.1)
+        if not GOAL_LOG_PATH.is_file():
+            return []
+        return _parse_goal_records_from_file()
 
 
 def select_session_id(records, session_id=None):
@@ -244,9 +255,10 @@ def call_ollama(messages):
 
 
 def write_goal_records(records):
-    with GOAL_LOG_PATH.open("w", encoding="utf-8") as log_file:
+    with GOAL_TMP_PATH.open("w", encoding="utf-8") as tmp_file:
         for record in records:
-            log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            tmp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    os.replace(GOAL_TMP_PATH, GOAL_LOG_PATH)
 
 
 def normalize_session_goal_records(session_goal_records):
