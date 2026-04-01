@@ -11,6 +11,7 @@ from urllib import error, request
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 CONVERSATION_LOG_PATH = LOG_DIR / "conversation_log.jsonl"
+CONVERSATION_SNAPSHOT_PATH = LOG_DIR / "conversation_log.snapshot.jsonl"
 TASKS_LOG_PATH = LOG_DIR / "tasks.jsonl"
 GOAL_LOG_PATH = LOG_DIR / "goal.jsonl"
 GOAL_TMP_PATH = LOG_DIR / "goal.jsonl.tmp"
@@ -102,13 +103,36 @@ def ensure_log_dir() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_conversation_records():
+def create_conversation_snapshot():
     if not CONVERSATION_LOG_PATH.is_file():
         raise FileNotFoundError(f"Conversation log not found: {CONVERSATION_LOG_PATH}")
 
+    raw_lines = CONVERSATION_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    last_index = len(raw_lines) - 1
+
+    with CONVERSATION_SNAPSHOT_PATH.open("w", encoding="utf-8") as snapshot_file:
+        for index, line in enumerate(raw_lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                json.loads(stripped)
+                snapshot_file.write(stripped + "\n")
+            except json.JSONDecodeError:
+                if index == last_index:
+                    continue
+                raise ValueError(
+                    f"Invalid JSON in conversation log at line {index + 1}"
+                )
+
+
+def load_conversation_records():
+    if not CONVERSATION_SNAPSHOT_PATH.is_file():
+        raise FileNotFoundError(f"Conversation snapshot not found: {CONVERSATION_SNAPSHOT_PATH}")
+
     records = []
-    with CONVERSATION_LOG_PATH.open("r", encoding="utf-8") as log_file:
-        for line_number, line in enumerate(log_file, start=1):
+    with CONVERSATION_SNAPSHOT_PATH.open("r", encoding="utf-8") as snapshot_file:
+        for line_number, line in enumerate(snapshot_file, start=1):
             line = line.strip()
             if not line:
                 continue
@@ -117,7 +141,7 @@ def load_conversation_records():
                 records.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 raise ValueError(
-                    f"Invalid JSON in conversation log at line {line_number}: {exc}"
+                    f"Invalid JSON in conversation snapshot at line {line_number}: {exc}"
                 ) from exc
 
     return records
@@ -556,11 +580,15 @@ def evaluate_task_deviation(task, goals, conversation_records):
 def main(session_id=None) -> str:
     ensure_log_dir()
 
+    if CONVERSATION_SNAPSHOT_PATH.exists():
+        CONVERSATION_SNAPSHOT_PATH.unlink()
+
     session_id_arg = session_id
     if session_id_arg is None and len(sys.argv) > 1:
         session_id_arg = sys.argv[1]
 
     try:
+        create_conversation_snapshot()
         records = load_conversation_records()
         session_id = select_session_id(records, session_id_arg)
         initial_turns_text = build_initial_turns_text(records, session_id)
@@ -650,6 +678,10 @@ def main(session_id=None) -> str:
 
     append_tasks_log(result)
     print(f"Saved analysis for session {session_id} to {TASKS_LOG_PATH}")
+
+    if CONVERSATION_SNAPSHOT_PATH.exists():
+        CONVERSATION_SNAPSHOT_PATH.unlink()
+
     return session_id
 
 

@@ -40,7 +40,7 @@ def validate_session_id(graph, session_id=None):
 
 
 def escape_mermaid_label(text):
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    return text.replace("\\", "").replace('"', "").replace("'", "")
 
 
 def build_mermaid(graph):
