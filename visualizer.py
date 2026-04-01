@@ -57,8 +57,14 @@ def build_mermaid(graph):
         label = escape_mermaid_label(task_name)
         lines.append(f'  {node_id}["{label}"]')
 
-    for edge in edges:
-        lines.append(f'  {edge["from"]} --> {edge["to"]}')
+    cycle_edge_indexes = []
+    for edge_index, edge in enumerate(edges):
+        edge_type = edge.get("type", "next")
+        if edge_type == "cycle":
+            lines.append(f'  {edge["from"]} -.-> {edge["to"]}')
+            cycle_edge_indexes.append(edge_index)
+        else:
+            lines.append(f'  {edge["from"]} --> {edge["to"]}')
 
     lines.append("  classDef completed fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;")
     lines.append("  classDef inProgress fill:#fff3bf,stroke:#f9a825,stroke-width:2px,color:#8a6d00;")
@@ -73,6 +79,11 @@ def build_mermaid(graph):
             class_name = STATUS_CLASSES.get(status)
         if class_name:
             lines.append(f'  class {node["id"]} {class_name};')
+
+    for edge_index in cycle_edge_indexes:
+        lines.append(
+            f"  linkStyle {edge_index} stroke:#1e88e5,stroke-width:2px,color:#1e88e5;"
+        )
 
     return "\n".join(lines)
 
@@ -232,6 +243,7 @@ def build_html(graph, mermaid_text):
     <div class="legend-item"><span class="swatch" style="background:#fff3bf;"></span>in_progress</div>
     <div class="legend-item"><span class="swatch" style="background:#e0e0e0;"></span>abandoned</div>
     <div class="legend-item"><span class="swatch" style="background:#ffcdd2;"></span>deviation</div>
+    <div class="legend-item"><span class="swatch" style="background:#1e88e5;"></span>cycle edge</div>
   </div>
   <div class="graph-card">
     <pre class="mermaid">

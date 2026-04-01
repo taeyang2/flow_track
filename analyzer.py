@@ -97,6 +97,25 @@ Respond only in JSON format:
 new_goals must be in Korean only.
 If goal_changed is false, new_goals should be an empty list.
 """
+CYCLE_DETECTION_SYSTEM_PROMPT = """You are a work flow analyst.
+Given a new task and a list of previous tasks,
+determine if the new task represents a return
+to a previously performed task (cycle).
+
+A cycle occurs when:
+1. The user revisits a previous task after
+   completing or abandoning it.
+2. The new task is functionally identical or
+   closely related to a previous task,
+   indicating the workflow has looped back.
+
+Respond only in JSON format:
+{
+  "is_cycle": true or false,
+  "cycle_target_turn": <start_turn of the target task or null>
+}
+If is_cycle is false, cycle_target_turn must be null.
+"""
 
 
 def ensure_log_dir() -> None:
@@ -391,33 +410,38 @@ def load_task_records():
 
 
 def load_existing_tasks(session_id):
-    """Return (existing_tasks, last_start_turn) from the latest tasks.jsonl record for session_id.
+    """Return latest task state for the session.
 
     existing_tasks: list of task dicts already saved (may be empty)
+    existing_cycle_edges: list of cycle edge dicts already saved (may be empty)
     last_start_turn: highest start_turn seen, or 0 if none
     """
     if not TASKS_LOG_PATH.is_file():
-        return [], 0
+        return [], [], 0
 
     try:
         records = load_task_records()
     except (FileNotFoundError, ValueError):
-        return [], 0
+        return [], [], 0
 
     session_records = [r for r in records if r.get("session_id") == session_id]
     if not session_records:
-        return [], 0
+        return [], [], 0
 
     session_records.sort(key=lambda item: item.get("analyzed_at", ""))
-    tasks = session_records[-1].get("tasks", [])
-    if not isinstance(tasks, list) or not tasks:
-        return [], 0
+    latest_record = session_records[-1]
+    tasks = latest_record.get("tasks", [])
+    cycle_edges = latest_record.get("cycle_edges", [])
+    if not isinstance(tasks, list):
+        tasks = []
+    if not isinstance(cycle_edges, list):
+        cycle_edges = []
 
     last_start_turn = max(
         (t.get("start_turn", 0) for t in tasks if isinstance(t.get("start_turn"), int)),
         default=0,
     )
-    return tasks, last_start_turn
+    return tasks, cycle_edges, last_start_turn
 
 
 def build_conversation_text_after_turn(records, session_id, after_turn):
@@ -577,6 +601,85 @@ def evaluate_task_deviation(task, goals, conversation_records):
     return not relevant
 
 
+def detect_cycle_edges(new_tasks, existing_tasks, conversation_records):
+    if not new_tasks or not existing_tasks:
+        return []
+
+    existing_task_payload = []
+    valid_existing_turns = set()
+    for task in existing_tasks:
+        start_turn = task.get("start_turn")
+        if not isinstance(start_turn, int):
+            continue
+        valid_existing_turns.add(start_turn)
+        existing_task_payload.append(
+            {
+                "task_name": task.get("task_name", ""),
+                "status": task.get("status", ""),
+                "start_turn": start_turn,
+            }
+        )
+
+    if not existing_task_payload:
+        return []
+
+    cycle_edges = []
+    seen_edges = set()
+    for task in new_tasks:
+        from_turn = task.get("start_turn")
+        if not isinstance(from_turn, int):
+            continue
+
+        payload = {
+            "new_task": {
+                "task_name": task.get("task_name", ""),
+                "status": task.get("status", ""),
+                "start_turn": from_turn,
+            },
+            "previous_tasks": existing_task_payload,
+            "context": build_task_context(conversation_records, from_turn),
+        }
+        messages = [
+            {"role": "system", "content": CYCLE_DETECTION_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        raw_response = call_ollama(messages)
+        cleaned_response = strip_code_block(raw_response)
+        parsed_response = json.loads(cleaned_response)
+
+        is_cycle = parsed_response.get("is_cycle")
+        cycle_target_turn = parsed_response.get("cycle_target_turn")
+
+        if not isinstance(is_cycle, bool):
+            raise ValueError("`is_cycle` field is missing or is not a boolean.")
+
+        if is_cycle:
+            if not isinstance(cycle_target_turn, int):
+                raise ValueError(
+                    "`cycle_target_turn` must be an integer when `is_cycle` is true."
+                )
+            if cycle_target_turn not in valid_existing_turns:
+                raise ValueError(
+                    f"`cycle_target_turn` {cycle_target_turn} does not match any existing task."
+                )
+            edge_key = (from_turn, cycle_target_turn)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            cycle_edges.append(
+                {
+                    "from_turn": from_turn,
+                    "to_turn": cycle_target_turn,
+                }
+            )
+        elif cycle_target_turn is not None:
+            raise ValueError(
+                "`cycle_target_turn` must be null when `is_cycle` is false."
+            )
+
+    return cycle_edges
+
+
 def main(session_id=None) -> str:
     ensure_log_dir()
 
@@ -609,7 +712,7 @@ def main(session_id=None) -> str:
             print(f"Ollama request failed during goal extraction: {exc}")
             sys.exit(1)
 
-    existing_tasks, last_start_turn = load_existing_tasks(session_id)
+    existing_tasks, existing_cycle_edges, last_start_turn = load_existing_tasks(session_id)
 
     if existing_tasks:
         conversation_text = build_conversation_text_after_turn(records, session_id, last_start_turn)
@@ -622,6 +725,7 @@ def main(session_id=None) -> str:
             "session_id": session_id,
             "analyzed_at": datetime.now().isoformat(timespec="seconds"),
             "tasks": existing_tasks,
+            "cycle_edges": existing_cycle_edges,
         })
         print(f"Saved analysis for session {session_id} to {TASKS_LOG_PATH}")
         return session_id
@@ -644,6 +748,7 @@ def main(session_id=None) -> str:
         "session_id": session_id,
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
         "tasks": [],
+        "cycle_edges": existing_cycle_edges,
     }
 
     try:
@@ -665,15 +770,19 @@ def main(session_id=None) -> str:
                 )
             new_tasks.append(normalized_task)
         result["tasks"] = existing_tasks + new_tasks
+        result["cycle_edges"] = existing_cycle_edges + detect_cycle_edges(
+            new_tasks, existing_tasks, session_records
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"Failed to parse Ollama JSON response: {exc}")
         result["raw_response"] = raw_response
         result["tasks"] = existing_tasks
+        result["cycle_edges"] = existing_cycle_edges
     except error.URLError as exc:
-        print(f"Ollama request failed during deviation analysis: {exc}")
+        print(f"Ollama request failed during deviation/cycle analysis: {exc}")
         sys.exit(1)
     except Exception as exc:
-        print(f"Ollama request failed during deviation analysis: {exc}")
+        print(f"Ollama request failed during deviation/cycle analysis: {exc}")
         sys.exit(1)
 
     append_tasks_log(result)
