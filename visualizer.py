@@ -100,6 +100,63 @@ def build_html(graph, mermaid_text):
         fontFamily: "Arial, sans-serif"
       }}
     }});
+
+    const AUTO_REFRESH_KEY = "flowTrackAutoRefreshEnabled";
+    const SCROLL_POSITION_KEY = "flowTrackScrollPosition";
+    const AUTO_REFRESH_INTERVAL_MS = 5000;
+
+    function isAutoRefreshEnabled() {{
+      const storedValue = sessionStorage.getItem(AUTO_REFRESH_KEY);
+      return storedValue !== "false";
+    }}
+
+    function saveScrollPosition() {{
+      sessionStorage.setItem(SCROLL_POSITION_KEY, String(window.scrollY));
+    }}
+
+    function restoreScrollPosition() {{
+      const storedPosition = sessionStorage.getItem(SCROLL_POSITION_KEY);
+      if (storedPosition === null) {{
+        return;
+      }}
+
+      const scrollY = Number.parseInt(storedPosition, 10);
+      if (!Number.isNaN(scrollY)) {{
+        window.scrollTo(0, scrollY);
+      }}
+    }}
+
+    function updateAutoRefreshButton(button) {{
+      const enabled = isAutoRefreshEnabled();
+      button.textContent = `자동 새로고침 ${{enabled ? "ON" : "OFF"}}`;
+      button.classList.toggle("is-on", enabled);
+      button.classList.toggle("is-off", !enabled);
+    }}
+
+    window.addEventListener("load", () => {{
+      restoreScrollPosition();
+
+      const toggleButton = document.getElementById("auto-refresh-toggle");
+      updateAutoRefreshButton(toggleButton);
+
+      toggleButton.addEventListener("click", () => {{
+        const nextValue = !isAutoRefreshEnabled();
+        sessionStorage.setItem(AUTO_REFRESH_KEY, String(nextValue));
+        updateAutoRefreshButton(toggleButton);
+      }});
+
+      window.addEventListener("beforeunload", saveScrollPosition);
+      window.addEventListener("scroll", saveScrollPosition, {{ passive: true }});
+
+      window.setInterval(() => {{
+        if (!isAutoRefreshEnabled()) {{
+          return;
+        }}
+
+        saveScrollPosition();
+        window.location.reload();
+      }}, AUTO_REFRESH_INTERVAL_MS);
+    }});
   </script>
   <style>
     body {{
@@ -145,6 +202,26 @@ def build_html(graph, mermaid_text):
       padding: 24px;
       overflow-x: auto;
     }}
+    .auto-refresh-toggle {{
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 1000;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+    }}
+    .auto-refresh-toggle.is-on {{
+      background: #2e7d32;
+    }}
+    .auto-refresh-toggle.is-off {{
+      background: #757575;
+    }}
   </style>
 </head>
 <body>
@@ -161,6 +238,7 @@ def build_html(graph, mermaid_text):
 {mermaid_text}
     </pre>
   </div>
+  <button id="auto-refresh-toggle" class="auto-refresh-toggle" type="button"></button>
 </body>
 </html>
 """
