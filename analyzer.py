@@ -334,6 +334,75 @@ def restore_previous_goal_version(session_id):
     return save_goal_version(session_id, restored_goals, auto_extracted=False)
 
 
+def load_task_records():
+    if not TASKS_LOG_PATH.is_file():
+        raise FileNotFoundError(f"Tasks log not found: {TASKS_LOG_PATH}")
+
+    records = []
+    with TASKS_LOG_PATH.open("r", encoding="utf-8") as log_file:
+        for line_number, line in enumerate(log_file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in tasks log at line {line_number}: {exc}"
+                ) from exc
+
+    return records
+
+
+def load_existing_tasks(session_id):
+    """Return (existing_tasks, last_start_turn) from the latest tasks.jsonl record for session_id.
+
+    existing_tasks: list of task dicts already saved (may be empty)
+    last_start_turn: highest start_turn seen, or 0 if none
+    """
+    if not TASKS_LOG_PATH.is_file():
+        return [], 0
+
+    try:
+        records = load_task_records()
+    except (FileNotFoundError, ValueError):
+        return [], 0
+
+    session_records = [r for r in records if r.get("session_id") == session_id]
+    if not session_records:
+        return [], 0
+
+    session_records.sort(key=lambda item: item.get("analyzed_at", ""))
+    tasks = session_records[-1].get("tasks", [])
+    if not isinstance(tasks, list) or not tasks:
+        return [], 0
+
+    last_start_turn = max(
+        (t.get("start_turn", 0) for t in tasks if isinstance(t.get("start_turn"), int)),
+        default=0,
+    )
+    return tasks, last_start_turn
+
+
+def build_conversation_text_after_turn(records, session_id, after_turn):
+    session_records = [record for record in records if record.get("session_id") == session_id]
+    if not session_records:
+        raise ValueError(f"No records found for session: {session_id}")
+
+    session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", "")))
+
+    lines = []
+    for record in session_records:
+        turn = record.get("turn", 0)
+        if isinstance(turn, int) and turn <= after_turn:
+            continue
+        role = record.get("role", "unknown")
+        content = record.get("content", "")
+        lines.append(f"Turn {turn} [{role}]: {content}")
+
+    return "\n".join(lines)
+
+
 def append_tasks_log(record):
     with TASKS_LOG_PATH.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -482,7 +551,6 @@ def main(session_id=None) -> str:
     try:
         records = load_conversation_records()
         session_id = select_session_id(records, session_id_arg)
-        conversation_text = build_conversation_text(records, session_id)
         initial_turns_text = build_initial_turns_text(records, session_id)
         goal_records = load_goal_records()
         goals = load_session_goals(goal_records, session_id)
@@ -500,6 +568,23 @@ def main(session_id=None) -> str:
         except Exception as exc:
             print(f"Ollama request failed during goal extraction: {exc}")
             sys.exit(1)
+
+    existing_tasks, last_start_turn = load_existing_tasks(session_id)
+
+    if existing_tasks:
+        conversation_text = build_conversation_text_after_turn(records, session_id, last_start_turn)
+    else:
+        conversation_text = build_conversation_text(records, session_id)
+
+    if not conversation_text.strip():
+        print(f"No new turns to analyze for session {session_id}.")
+        append_tasks_log({
+            "session_id": session_id,
+            "analyzed_at": datetime.now().isoformat(timespec="seconds"),
+            "tasks": existing_tasks,
+        })
+        print(f"Saved analysis for session {session_id} to {TASKS_LOG_PATH}")
+        return session_id
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -530,7 +615,7 @@ def main(session_id=None) -> str:
         session_records = [
             record for record in records if record.get("session_id") == session_id
         ]
-        normalized_tasks = []
+        new_tasks = []
         for task in tasks:
             normalized_task = dict(task)
             normalized_task["deviation"] = False
@@ -538,11 +623,12 @@ def main(session_id=None) -> str:
                 normalized_task["deviation"] = evaluate_task_deviation(
                     normalized_task, goals, session_records
                 )
-            normalized_tasks.append(normalized_task)
-        result["tasks"] = normalized_tasks
+            new_tasks.append(normalized_task)
+        result["tasks"] = existing_tasks + new_tasks
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"Failed to parse Ollama JSON response: {exc}")
         result["raw_response"] = raw_response
+        result["tasks"] = existing_tasks
     except error.URLError as exc:
         print(f"Ollama request failed during deviation analysis: {exc}")
         sys.exit(1)
