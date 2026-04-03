@@ -144,6 +144,73 @@ def build_html(graph, mermaid_text):
       button.classList.toggle("is-off", !enabled);
     }}
 
+    function getLowestMermaidNode() {{
+      const nodes = Array.from(document.querySelectorAll(".mermaid svg g.node"));
+      if (!nodes.length) {{
+        return null;
+      }}
+
+      let lowestNode = null;
+      let lowestBottom = -Infinity;
+
+      for (const node of nodes) {{
+        if (typeof node.getBBox !== "function") {{
+          continue;
+        }}
+        const box = node.getBBox();
+        const bottom = box.y + box.height;
+        if (bottom > lowestBottom) {{
+          lowestBottom = bottom;
+          lowestNode = node;
+        }}
+      }}
+
+      return lowestNode;
+    }}
+
+    function alignLowestNodeWithChatInput() {{
+      const frame = window.frameElement;
+      const parentWindow = window.parent;
+      if (!frame || !parentWindow || !parentWindow.document) {{
+        return;
+      }}
+
+      const chatInput = parentWindow.document.querySelector('div[data-testid="stChatInput"]');
+      const svg = document.querySelector(".mermaid svg");
+      const lowestNode = getLowestMermaidNode();
+      if (!chatInput || !svg || !lowestNode || typeof lowestNode.getBBox !== "function") {{
+        return;
+      }}
+
+      const svgRect = svg.getBoundingClientRect();
+      const frameRect = frame.getBoundingClientRect();
+      const chatRect = chatInput.getBoundingClientRect();
+      const nodeBox = lowestNode.getBBox();
+      const nodeBottomInDocument = svgRect.top + window.scrollY + nodeBox.y + nodeBox.height;
+      const targetViewportY = chatRect.top + (chatRect.height / 2);
+      const targetScrollTop = nodeBottomInDocument - (targetViewportY - frameRect.top);
+
+      window.scrollTo({{
+        top: Math.max(0, targetScrollTop),
+        behavior: "auto",
+      }});
+    }}
+
+    function scheduleNodeAlignment(attempts = 0) {{
+      const svg = document.querySelector(".mermaid svg");
+      const chatInput = window.parent?.document?.querySelector('div[data-testid="stChatInput"]');
+      if (!svg || !chatInput) {{
+        if (attempts < 30) {{
+          window.setTimeout(() => scheduleNodeAlignment(attempts + 1), 200);
+        }}
+        return;
+      }}
+
+      window.requestAnimationFrame(() => {{
+        alignLowestNodeWithChatInput();
+      }});
+    }}
+
     window.addEventListener("load", () => {{
       restoreScrollPosition();
 
@@ -158,6 +225,7 @@ def build_html(graph, mermaid_text):
 
       window.addEventListener("beforeunload", saveScrollPosition);
       window.addEventListener("scroll", saveScrollPosition, {{ passive: true }});
+      scheduleNodeAlignment();
 
       window.setInterval(() => {{
         if (!isAutoRefreshEnabled()) {{
