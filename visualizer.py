@@ -82,7 +82,7 @@ def build_mermaid(graph):
 
     for edge_index in cycle_edge_indexes:
         lines.append(
-            f"  linkStyle {edge_index} stroke:#1e88e5,stroke-width:2px,color:#1e88e5;"
+            f"  linkStyle {edge_index} stroke:#1e88e5,stroke-width:2px;"
         )
 
     return "\n".join(lines)

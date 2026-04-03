@@ -15,13 +15,27 @@ CONVERSATION_SNAPSHOT_PATH = LOG_DIR / "conversation_log.snapshot.jsonl"
 TASKS_LOG_PATH = LOG_DIR / "tasks.jsonl"
 GOAL_LOG_PATH = LOG_DIR / "goal.jsonl"
 GOAL_TMP_PATH = LOG_DIR / "goal.jsonl.tmp"
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "gemma3:12b"
-SYSTEM_PROMPT = """You are an expert in analyzing work-related conversations.
-Extract the list of tasks the user attempted to perform from the conversation below.
-task_name must be in Korean only.
-Do not include English translation or romanization.
-Respond only in the following JSON format. Do not include any other text.
+#OLLAMA_URL = "http://localhost:11434/api/chat"
+#OLLAMA_MODEL = "gemma2:12b"
+OLLAMA_URL = "http://localhost:11444/api/chat"
+OLLAMA_MODEL = "qwen2.5:7b"
+# SYSTEM_PROMPT = """You are an expert in analyzing work-related conversations.
+# Extract the list of tasks the user attempted to perform from the conversation below.
+# task_name must be in Korean only.
+# Do not include English translation or romanization.
+# Respond only in the following JSON format. Do not include any other text.
+# {
+#   "tasks": [
+#     {
+#       "task_name": "task name in Korean",
+#       "status": "completed | in_progress | abandoned",
+#       "start_turn": 1
+#     }
+#   ]
+# }
+# """
+SYSTEM_PROMPT = """Extract tasks from the conversation below.
+Respond only in JSON format:
 {
   "tasks": [
     {
@@ -31,7 +45,8 @@ Respond only in the following JSON format. Do not include any other text.
     }
   ]
 }
-"""
+task_name must be in Korean only.
+Do not include any other text."""
 GOAL_RELEVANCE_SYSTEM_PROMPT = """You are a work flow analyst.
 Given a goal list, a task, and the surrounding conversation context,
 determine if the task is relevant to achieving the goals.
@@ -97,24 +112,8 @@ Respond only in JSON format:
 new_goals must be in Korean only.
 If goal_changed is false, new_goals should be an empty list.
 """
-CYCLE_DETECTION_SYSTEM_PROMPT = """You are a work flow analyst.
-Given a new task and a list of previous tasks,
-determine if the new task represents a return
-to a previously performed task (cycle).
-
-A cycle occurs when:
-1. The user revisits a previous task after
-   completing or abandoning it.
-2. The new task is functionally identical or
-   closely related to a previous task,
-   indicating the workflow has looped back.
-
-Respond only in JSON format:
-{
-  "is_cycle": true or false,
-  "cycle_target_turn": <start_turn of the target task or null>
-}
-If is_cycle is false, cycle_target_turn must be null.
+CYCLE_DETECTION_SYSTEM_PROMPT = """Determine if the new task is a return to a previous task (cycle).
+Respond only in JSON: {"is_cycle": true, "cycle_target_turn": 1} or {"is_cycle": false, "cycle_target_turn": null}
 """
 
 
@@ -208,19 +207,24 @@ def select_session_id(records, session_id=None):
     return max(session_ids)
 
 
-def build_conversation_text(records, session_id):
+def build_conversation_text(records, session_id, max_turns=10):
     session_records = [record for record in records if record.get("session_id") == session_id]
     if not session_records:
         raise ValueError(f"No records found for session: {session_id}")
 
     session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", "")))
 
+    all_turns = sorted({record.get("turn") for record in session_records})
+    recent_turns = set(all_turns[-max_turns:])
+    session_records = [record for record in session_records if record.get("turn") in recent_turns]
+
     lines = []
     for record in session_records:
+        if record.get("role") != "user":
+            continue
         turn = record.get("turn", "")
-        role = record.get("role", "unknown")
         content = record.get("content", "")
-        lines.append(f"Turn {turn} [{role}]: {content}")
+        lines.append(f"Turn {turn} [user]: {content}")
 
     return "\n".join(lines)
 
@@ -277,10 +281,21 @@ def build_recent_turns_text(records, session_id, last_n_turns=5):
 
 
 def call_ollama(messages):
+    patched_messages = []
+    for message in messages:
+        if message.get("role") == "system":
+            patched_messages.append({
+                "role": "system",
+                "content": "You are a JSON-only responder. Always respond with valid JSON and nothing else. No explanations, no markdown, no prose.\n\n" + message["content"],
+            })
+        else:
+            patched_messages.append(message)
+
     payload = {
         "model": OLLAMA_MODEL,
-        "messages": messages,
+        "messages": patched_messages,
         "stream": False,
+        "format": "json",
     }
     data = json.dumps(payload).encode("utf-8")
     http_request = request.Request(
@@ -456,9 +471,10 @@ def build_conversation_text_after_turn(records, session_id, after_turn):
         turn = record.get("turn", 0)
         if isinstance(turn, int) and turn <= after_turn:
             continue
-        role = record.get("role", "unknown")
+        if record.get("role") != "user":
+            continue
         content = record.get("content", "")
-        lines.append(f"Turn {turn} [{role}]: {content}")
+        lines.append(f"Turn {turn} [user]: {content}")
 
     return "\n".join(lines)
 
@@ -549,7 +565,7 @@ def detect_goal_change(session_id, current_goals, conversation_records):
     return {"goal_changed": True, "new_goals": normalized_goals}
 
 
-def build_task_context(records, start_turn, turn_window=2):
+def build_task_context(records, start_turn, turn_window=1):
     if not isinstance(start_turn, int):
         return []
 
@@ -559,19 +575,11 @@ def build_task_context(records, start_turn, turn_window=2):
         record
         for record in records
         if min_turn <= record.get("turn", 0) <= max_turn
+        and record.get("role") == "user"
     ]
-    session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", ""), item.get("role", "")))
+    session_records.sort(key=lambda item: (item.get("turn", 0), item.get("timestamp", "")))
 
-    context = []
-    for record in session_records:
-        context.append(
-            {
-                "role": record.get("role", "unknown"),
-                "content": record.get("content", ""),
-            }
-        )
-
-    return context
+    return [record.get("content", "") for record in session_records]
 
 
 def evaluate_task_deviation(task, goals, conversation_records):
@@ -579,24 +587,20 @@ def evaluate_task_deviation(task, goals, conversation_records):
         return False
 
     start_turn = task.get("start_turn", 0)
-    payload = {
-        "goals": goals,
-        "task": {
-            "task_name": task.get("task_name", ""),
-            "status": task.get("status", ""),
-            "start_turn": start_turn,
-        },
-        "context": build_task_context(conversation_records, start_turn),
-    }
+    context = build_task_context(conversation_records, start_turn)
+    goals_str = json.dumps(goals, ensure_ascii=False)
+    context_str = json.dumps(context, ensure_ascii=False)
+    user_content = f"goals: {goals_str}, task: \"{task.get('task_name', '')}\", context: {context_str}"
     messages = [
         {"role": "system", "content": GOAL_RELEVANCE_SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": user_content},
     ]
     raw_response = call_ollama(messages)
     cleaned_response = strip_code_block(raw_response)
     parsed_response = json.loads(cleaned_response)
     relevant = parsed_response.get("relevant")
     if not isinstance(relevant, bool):
+        print(f"[DEBUG] evaluate_task_deviation raw response:\n{raw_response}")
         raise ValueError("`relevant` field is missing or is not a boolean.")
     return not relevant
 
@@ -630,18 +634,14 @@ def detect_cycle_edges(new_tasks, existing_tasks, conversation_records):
         if not isinstance(from_turn, int):
             continue
 
-        payload = {
-            "new_task": {
-                "task_name": task.get("task_name", ""),
-                "status": task.get("status", ""),
-                "start_turn": from_turn,
-            },
-            "previous_tasks": existing_task_payload,
-            "context": build_task_context(conversation_records, from_turn),
-        }
+        previous_tasks_str = [
+            f"{t['task_name']}(turn {t['start_turn']})"
+            for t in existing_task_payload
+        ]
+        user_content = f"new_task: \"{task.get('task_name', '')}\", previous_tasks: {previous_tasks_str}"
         messages = [
             {"role": "system", "content": CYCLE_DETECTION_SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "user", "content": user_content},
         ]
         raw_response = call_ollama(messages)
         cleaned_response = strip_code_block(raw_response)
@@ -651,6 +651,7 @@ def detect_cycle_edges(new_tasks, existing_tasks, conversation_records):
         cycle_target_turn = parsed_response.get("cycle_target_turn")
 
         if not isinstance(is_cycle, bool):
+            print(f"[DEBUG] detect_cycle_edges raw response:\n{raw_response}")
             raise ValueError("`is_cycle` field is missing or is not a boolean.")
 
         if is_cycle:
@@ -735,6 +736,8 @@ def main(session_id=None) -> str:
         {"role": "user", "content": conversation_text},
     ]
 
+    print(f"[DEBUG] conversation_text (first 500 chars):\n{conversation_text[:500]}")
+
     try:
         raw_response = call_ollama(messages)
     except error.URLError as exc:
@@ -765,16 +768,24 @@ def main(session_id=None) -> str:
             normalized_task = dict(task)
             normalized_task["deviation"] = False
             if goals:
-                normalized_task["deviation"] = evaluate_task_deviation(
-                    normalized_task, goals, session_records
-                )
+                try:
+                    normalized_task["deviation"] = evaluate_task_deviation(
+                        normalized_task, goals, session_records
+                    )
+                except (json.JSONDecodeError, ValueError, error.URLError) as deviation_exc:
+                    print(f"Failed to evaluate deviation for task '{normalized_task.get('task_name')}': {deviation_exc}")
             new_tasks.append(normalized_task)
         result["tasks"] = existing_tasks + new_tasks
-        result["cycle_edges"] = existing_cycle_edges + detect_cycle_edges(
-            new_tasks, existing_tasks, session_records
-        )
+        try:
+            result["cycle_edges"] = existing_cycle_edges + detect_cycle_edges(
+                new_tasks, existing_tasks, session_records
+            )
+        except (json.JSONDecodeError, ValueError, error.URLError) as cycle_exc:
+            print(f"Failed to detect cycle edges: {cycle_exc}")
+            result["cycle_edges"] = existing_cycle_edges
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"Failed to parse Ollama JSON response: {exc}")
+        print(f"[DEBUG] Raw Ollama response:\n{raw_response}")
         result["raw_response"] = raw_response
         result["tasks"] = existing_tasks
         result["cycle_edges"] = existing_cycle_edges
